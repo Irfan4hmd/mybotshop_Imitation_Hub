@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from imitation_hub.base_node import ImitationBaseNode
 import message_filters
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Float64MultiArray
@@ -9,7 +10,7 @@ import numpy as np
 import os
 from datetime import datetime
 
-class DataCollectorNode(Node):
+class DataCollectorNode(ImitationBaseNode):
     def __init__(self):
         super().__init__('data_collector_node')
         
@@ -33,9 +34,9 @@ class DataCollectorNode(Node):
 
         # Subscriptions using message_filters for synchronization
         # We don't use standard subscribers because camera (30hz) and joints (100hz) publish at different rates.
-        self.image_sub = message_filters.Subscriber(self, Image, '/camera/image_raw')
-        self.joint_sub = message_filters.Subscriber(self, JointState, '/joint_states')
-        self.action_sub = message_filters.Subscriber(self, Float64MultiArray, '/teleop_cmd') # Human commands
+        self.image_sub = message_filters.Subscriber(self, Image, self.camera_topic)
+        self.joint_sub = message_filters.Subscriber(self, JointState, self.state_topic)
+        self.action_sub = message_filters.Subscriber(self, Float64MultiArray, self.teleop_topic) # Human commands
 
         # ApproximateTimeSynchronizer matches messages that arrive around the same time
         self.ts = message_filters.ApproximateTimeSynchronizer(
