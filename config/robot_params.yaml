@@ -1,0 +1,16 @@
+/**:
+  ros__parameters:
+      # ---------------------------------------------------------
+      # Configuration for a 6-DOF Robotic Arm (Default)
+      # ---------------------------------------------------------
+      robot_type: "manipulator" 
+      
+      # Topic Names
+      camera_topic: "/camera/image_raw"
+      state_topic: "/joint_states"
+      teleop_topic: "/teleop_cmd"
+      command_topic: "/joint_trajectory_controller/joint_trajectory"
+      
+      # Neural Network Dimensions
+      state_dim: 6   # 6 joint angles
+      action_dim: 6  # 6 target joint angles

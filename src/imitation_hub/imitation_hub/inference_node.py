@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from imitation_hub.base_node import ImitationBaseNode
 import message_filters
 from sensor_msgs.msg import Image, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -10,13 +11,13 @@ import os
 
 from imitation_hub.train_bc import VisuomotorPolicy
 
-class InferenceNode(Node):
+class InferenceNode(ImitationBaseNode):
     def __init__(self):
         super().__init__('il_inference_node')
         self.bridge = CvBridge()
         
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = VisuomotorPolicy(joint_dim=6, action_dim=6).to(self.device)
+        self.model = VisuomotorPolicy(joint_dim=self.state_dim, action_dim=self.action_dim).to(self.device)
         weights_path = "bc_model_weights.pth"
         if os.path.exists(weights_path):
             self.model.load_state_dict(torch.load(weights_path, map_location=self.device))
@@ -31,10 +32,10 @@ class InferenceNode(Node):
         
         # 2. ROS2 Publishers & Subscribers
         # We publish to the trajectory controller so ros2_control can execute the movement smoothly
-        self.cmd_pub = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
+        self.cmd_pub = self.create_publisher(JointTrajectory, self.command_topic, 10)
 
-        self.image_sub = message_filters.Subscriber(self, Image, '/camera/image_raw')
-        self.joint_sub = message_filters.Subscriber(self, JointState, '/joint_states')
+        self.image_sub = message_filters.Subscriber(self, Image, self.camera_topic)
+        self.joint_sub = message_filters.Subscriber(self, JointState, self.state_topic)
 
         # Synchronize live camera and joint states
         self.ts = message_filters.ApproximateTimeSynchronizer(
