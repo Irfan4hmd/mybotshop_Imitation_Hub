@@ -5,6 +5,7 @@ The **MYBOTSHOP Imitation Hub** is a proposed extension to the MYBOTSHOP robotic
 * **Seamless Data Collection:** Synchronizes camera feeds and joint states during Web UI teleoperation.
 * **Training Pipeline:** Converts recorded data into Behavior Cloning models upon triggering.
 * **One-Click Autonomy:** Deploys trained neural networks back to ROS2 for real-time autonomous execution.
+* **YAML-Driven Hardware Agnosticism:** Seamlessly switches between 6-DOF manipulators and mobile bases without altering Python source code.
 
 # The Architecture of the Imitation Hub pipeline
 
@@ -98,5 +99,12 @@ While continuous integration and scheduled training (e.g., via cron jobs) are st
 
 **How's this architecture Hardware-agnostic?**
 
-You will notice the architecture routes both `/teleop_cmd` and `/joint_trajectory_controller` through the `ros2_control` Manager. Teleoperation via the Web UI typically requires a streaming controller (like a Forward Position/Velocity Controller or MoveIt Servo) for responsive human input. Conversely, the Inference Node can predict action chunks and execute them smoothly via the `joint_trajectory_controller`, allowing the system to remain hardware-agnostic while ensuring safe, interpolated movements.
+You will notice the architecture routes both `/teleop_cmd` and `/joint_trajectory_controller` through the `ros2_control` Manager. Teleoperation via the Web UI typically requires a streaming controller (like a Forward Position/Velocity Controller or MoveIt Servo) for responsive human input. Conversely, the Inference Node can predict action chunks and execute them smoothly via the `joint_trajectory_controller`, allowing the system to remain hardware-agnostic while ensuring safe, interpolated movements.To fulfill the requirement that this platform must work with different types of robots (humanoids, arms, mobile bases), hardcoding topic names and AI network dimensions is avoided. The entire pipeline is driven by a central ROS2 Parameter File (config/robot_params.yaml).
 
+**Resolution Independence & I/O Optimization**
+
+The PyTorch VisuomotorPolicy integrates an AdaptiveAvgPool2d layer. This mathematically guarantees a fixed feature vector size entering the MLP, preventing matrix multiplication crashes regardless of the physical camera resolution used (e.g., 480p vs 1080p). Furthermore, cv2.resize is applied frame-by-frame during the PyTorch Dataloader phase to bypass severe I/O bottlenecks and RAM overflow, resulting in exponentially faster GPU training speeds.
+
+**Controller Management**
+
+The architecture routes both /teleop_cmd and /joint_trajectory_controller through the ros2_control Manager. Teleoperation via the Web UI typically requires a streaming controller (like a Forward Position/Velocity Controller) for responsive human input. Conversely, the Inference Node safely interpolates AI action chunks via the joint_trajectory_controller, allowing the system to remain hardware-agnostic while ensuring safe, continuous movements.
