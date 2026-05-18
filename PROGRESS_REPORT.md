@@ -41,3 +41,50 @@ To resolve this, my next step is to record **Recovery Data**. I will record spec
 
 **Note:**
 I would also like to add that I had written the code of small 3-layer CNN just as a structural prototype for demo but for deployment on real MYBOTSHOP hardware dealing with complex lighting and real-world textures, the 3-layer CNN block can be easily swapped for a pre-trained ResNet-18/50 backbone (via torchvision) to leverage robust spatial feature extraction without changing the downstream MLP or ROS2 pipeline.
+
+## How to Test
+
+**Switch to turtlesim_imp branch**
+
+### 1. Build the Workspace
+
+```bash
+colcon build
+source install/setup.bash
+```
+
+### 2. Start the Simulator
+
+```bash
+ros2 run turtlesim turtlesim_node
+```
+
+Open another terminal and run:
+
+```bash
+ros2 run imitation_hub turtlesim_bridge
+```
+
+### 3. Collect Training Data
+
+```bash
+ros2 run imitation_hub data_collector_node --ros-args --params-file config/robot_params.yaml
+```
+
+Drive the robot manually using:
+
+```bash
+ros2 run turtlesim turtle_teleop_key
+```
+
+### 4. Train the Behavior Cloning Model
+
+```bash
+ros2 run imitation_hub train_bc
+```
+
+### 5. Deploy the Trained Policy
+
+```bash
+ros2 run imitation_hub inference_node --ros-args --params-file config/robot_params.yaml
+```
