@@ -1,4 +1,6 @@
+import glob
 import os
+import cv2
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,15 +22,20 @@ class RobotDemonstrationDataset(Dataset):
         
         self.length = self.images.shape[0]
 
+        self.state_dim = self.joints.shape[1]
+        self.action_dim = self.actions.shape[1]
+
     def __len__(self):
-        return self.length
+        # return self.length
+        return min(self.length, 2000)
+
 
     def __getitem__(self, idx):
         # Read data
         img = self.images[idx]
         joints = self.joints[idx]
         action = self.actions[idx]
-
+        img = cv2.resize(img, (160, 120), interpolation=cv2.INTER_AREA)
         # Convert Image from HWC (OpenCV/ROS) to CHW (PyTorch standard)
         img = np.transpose(img, (2, 0, 1))
         
@@ -48,14 +55,20 @@ class VisuomotorPolicy(nn.Module):
     def __init__(self, joint_dim=6, action_dim=6):
         super(VisuomotorPolicy, self).__init__()
         
-        # Image Feature Extractor (Simple CNN for demonstration)
-        # In production, we might use a pre-trained ResNet18 here.
+        # Image Feature Extractor (CNN)
         self.cnn = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=5, stride=2), nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=5, stride=2), nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=5, stride=2), nn.ReLU(),
+            
+            # --- THE MAGIC FIX ---
+            # This forces the output of the CNN to ALWAYS be 5x5 pixels, 
+            # regardless of whether the camera is 480p, 720p, or 1080p!
+            nn.AdaptiveAvgPool2d((5, 5)), 
             nn.Flatten(),
-            nn.Linear(64 * 56 * 76, 128), # Assuming 480x640 input, flattened
+            
+            # Now we know the flattened size is exactly 64 channels * 5 * 5 = 1600
+            nn.Linear(64 * 5 * 5, 128), 
             nn.ReLU()
         )
         
@@ -63,20 +76,19 @@ class VisuomotorPolicy(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(128 + joint_dim, 128), nn.ReLU(),
             nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, action_dim) # Outputs the predicted joint command
+            nn.Linear(64, action_dim) # Outputs the predicted commands
         )
 
     def forward(self, img, joints):
         # Extract features from the camera image
         img_features = self.cnn(img)
         
-        # Concatenate image features with the robot's current joint states
+        # Concatenate image features with the robot's current states
         combined_features = torch.cat((img_features, joints), dim=1)
         
         # Predict the next action
         action_pred = self.mlp(combined_features)
         return action_pred
-
 # ---------------------------------------------------------
 # 3. Main Training Loop
 # ---------------------------------------------------------
@@ -85,13 +97,13 @@ def train(dataset_path, epochs=10, batch_size=32):
     dataset = RobotDemonstrationDataset(dataset_path)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
-    # Check for GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on device: {device}")
 
-    model = VisuomotorPolicy(joint_dim=6, action_dim=6).to(device)
+    # --- NEW CODE: Use the dynamically detected dimensions! ---
+    print(f"Auto-detected architecture: State Dim = {dataset.state_dim}, Action Dim = {dataset.action_dim}")
+    model = VisuomotorPolicy(joint_dim=dataset.state_dim, action_dim=dataset.action_dim).to(device)
     
-    # MSE Loss is standard for Behavior Cloning (Regression)
     criterion = nn.MSELoss() 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
@@ -128,12 +140,17 @@ def main():
     # We will just look for the most recently created dummy dataset.
     dataset_file = "demo_dataset_dummy.h5" 
     
-    if not os.path.exists(dataset_file):
-        print(f"Error: {dataset_file} not found. Please run the data collector first.")
-        # For demonstration purposes in a structural prototype, we won't crash.
+    list_of_files = glob.glob('demo_dataset_*.h5')
+    
+    if not list_of_files:
+        print("Error: No datasets found. Please run the data collector first.")
         return
         
-    train(dataset_file)
+    # Magically select the one that was created most recently!
+    latest_dataset = max(list_of_files, key=os.path.getctime)
+    
+    print(f"Auto-selected the newest dataset: {latest_dataset}")
+    train(latest_dataset,epochs=30)
 
 if __name__ == "__main__":
     main()

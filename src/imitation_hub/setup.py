@@ -26,7 +26,8 @@ setup(
         'console_scripts': [
             'data_collector_node = imitation_hub.data_collector_node:main',
             'inference_node = imitation_hub.inference_node:main',
-            'train_bc = imitation_hub.train_bc:main'
+            'train_bc = imitation_hub.train_bc:main',
+            'turtlesim_bridge = imitation_hub.bridges.turtlesim_bridge:main'
         ],
     },
 )
