@@ -39,6 +39,9 @@ srv/_*.py
 *.pyc
 qtcreator-*
 *.user
+# Model weights and datasets
+*.h5
+*.pth
 
 /planning/cfg
 /planning/docs
