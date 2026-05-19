@@ -137,3 +137,19 @@ The PyTorch VisuomotorPolicy integrates an AdaptiveAvgPool2d layer. This mathema
 **Controller Management**
 
 The architecture routes both /teleop_cmd and /joint_trajectory_controller through the ros2_control Manager. Teleoperation via the Web UI typically requires a streaming controller (like a Forward Position/Velocity Controller) for responsive human input. Conversely, the Inference Node safely interpolates AI action chunks via the joint_trajectory_controller, allowing the system to remain hardware-agnostic while ensuring safe, continuous movements.
+
+## Roadmap to Production (Scaling the ML Architecture)
+
+While this structural prototype includes standard Behavior Cloning (BC), pure BC suffers from **Compounding Errors (Covariate Shift)**. If the robot drifts into a state it never saw during training, errors snowball. To scale this pipeline for production manipulation tasks, the following upgrades would be implemented:
+
+**1. DAgger (Dataset Aggregation)**
+
+The pipeline is already architecturally primed for DAgger. By interleaving the Teleoperation UI and Autonomy Inference, a human operator can let the AI drive, take over when it makes a mistake, and record the corrections. Retraining on this aggregated dataset is the industry standard for resolving distribution shifts.
+
+**2. Action Chunking (Temporal Smoothing)**
+
+Currently, the inference node predicts a single action $a_t$ at time $t$. To prevent jitter and improve trajectory smoothness, the PyTorch model output would be modified to predict a chunk of future actions ($a_t ... a_{t+k}$). The ROS2 `inference_node` would then execute these open-loop via the `joint_trajectory_controller`.
+
+**3. State-of-the-Art Architectures (ACT / Diffusion)**
+
+For highly complex, multi-modal manipulation tasks (e.g., where there are multiple correct ways to pick up an object), standard MLPs average out the actions, resulting in failures. The modular `VisuomotorPolicy` class can be upgraded to utilize **Action Chunking with Transformers (ACT)** or a **Diffusion Policy** backend, which are the current state-of-the-art for handling multi-modal robotic demonstrations.
