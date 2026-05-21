@@ -1,156 +1,144 @@
-import glob
-import os
-import cv2
+import os, glob
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import h5py
 import numpy as np
+from torch.cuda.amp import GradScaler, autocast  # OPTIMIZATION: Mixed Precision
 
-# ---------------------------------------------------------
-# 1. PyTorch Dataset for loading HDF5 (Fast I/O)
-# ---------------------------------------------------------
+
 class RobotDemonstrationDataset(Dataset):
-    def __init__(self, h5_file_path):
-        self.h5_file_path = h5_file_path
-        self.file = h5py.File(h5_file_path, 'r')
-        
-        self.images = self.file['camera_images']
-        self.joints = self.file['joint_states']
-        self.actions = self.file['actions']
-        
-        self.length = self.images.shape[0]
+    def __init__(self, dataset_pattern="demo_dataset_*.h5"):
+        self.file_paths = glob.glob(dataset_pattern)
+        self.file_handles = {}  # Lazy loading prevents multiprocessing crashes
 
-        self.state_dim = self.joints.shape[1]
-        self.action_dim = self.actions.shape[1]
+        # Get dimensions from the first file safely
+        with h5py.File(self.file_paths[0], "r") as f:
+            self.state_dim = f["joint_states"].shape[1]
+            self.action_dim = f["actions"].shape[1]
 
-    def __len__(self):
-        # return self.length
-        return min(self.length, 2000)
+        # --- CRITICAL FIX: Build a Global-to-Local Index Map ---
+        # This maps a global index (e.g. 7864) to a specific file and local index
+        self.index_map = []
+        for path in self.file_paths:
+            with h5py.File(path, "r") as f:
+                num_frames = f["camera_images"].shape[0]
+                for local_idx in range(num_frames):
+                    self.index_map.append((path, local_idx))
 
-
-    def __getitem__(self, idx):
-        # Read data
-        img = self.images[idx]
-        joints = self.joints[idx]
-        action = self.actions[idx]
-        img = cv2.resize(img, (160, 120), interpolation=cv2.INTER_AREA)
-        # Convert Image from HWC (OpenCV/ROS) to CHW (PyTorch standard)
-        img = np.transpose(img, (2, 0, 1))
-        
-        # Normalize image to [0, 1]
-        img = img.astype(np.float32) / 255.0
-
-        return (
-            torch.tensor(img, dtype=torch.float32), 
-            torch.tensor(joints, dtype=torch.float32), 
-            torch.tensor(action, dtype=torch.float32)
+        self.total_length = len(self.index_map)
+        print(
+            f"Dataset initialized with {self.total_length} total frames across {len(self.file_paths)} files."
         )
 
-# ---------------------------------------------------------
-# 2. Visuomotor Neural Network Architecture
-# ---------------------------------------------------------
+    def __len__(self):
+        return self.total_length
+
+    def __getitem__(self, idx):
+        # Dynamically find the correct file and local index!
+        path, local_idx = self.index_map[idx]
+
+        # Lazy open file per-worker
+        if path not in self.file_handles:
+            self.file_handles[path] = h5py.File(path, "r")
+
+        f = self.file_handles[path]
+
+        # Fetch using the LOCAL index
+        img = f["camera_images"][local_idx]
+        joints = f["joint_states"][local_idx]
+        action = f["actions"][local_idx]
+
+        # Convert Image from HWC to CHW and normalize
+        img = np.transpose(img, (2, 0, 1)).astype(np.float32) / 255.0
+
+        return torch.from_numpy(img), torch.from_numpy(joints), torch.from_numpy(action)
+
+
 class VisuomotorPolicy(nn.Module):
     def __init__(self, joint_dim=6, action_dim=6):
         super(VisuomotorPolicy, self).__init__()
-        
-        # Image Feature Extractor (CNN)
         self.cnn = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=5, stride=2), nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=5, stride=2), nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=5, stride=2), nn.ReLU(),
-            
-            # --- THE MAGIC FIX ---
-            # This forces the output of the CNN to ALWAYS be 5x5 pixels, 
-            # regardless of whether the camera is 480p, 720p, or 1080p!
-            nn.AdaptiveAvgPool2d((5, 5)), 
+            nn.Conv2d(3, 16, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((5, 5)),
             nn.Flatten(),
-            
-            # Now we know the flattened size is exactly 64 channels * 5 * 5 = 1600
-            nn.Linear(64 * 5 * 5, 128), 
-            nn.ReLU()
+            nn.Linear(64 * 5 * 5, 128),
+            nn.ReLU(),
         )
-        
-        # Action Predictor (Combines Image Features + Current Joints)
         self.mlp = nn.Sequential(
-            nn.Linear(128 + joint_dim, 128), nn.ReLU(),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, action_dim) # Outputs the predicted commands
+            nn.Linear(128 + joint_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, action_dim),
         )
 
     def forward(self, img, joints):
-        # Extract features from the camera image
         img_features = self.cnn(img)
-        
-        # Concatenate image features with the robot's current states
         combined_features = torch.cat((img_features, joints), dim=1)
-        
-        # Predict the next action
-        action_pred = self.mlp(combined_features)
-        return action_pred
-# ---------------------------------------------------------
-# 3. Main Training Loop
-# ---------------------------------------------------------
-def train(dataset_path, epochs=10, batch_size=32):
-    print(f"Loading dataset from {dataset_path}...")
-    dataset = RobotDemonstrationDataset(dataset_path)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Training on device: {device}")
+        return self.mlp(combined_features)
 
-    # --- NEW CODE: Use the dynamically detected dimensions! ---
-    print(f"Auto-detected architecture: State Dim = {dataset.state_dim}, Action Dim = {dataset.action_dim}")
-    model = VisuomotorPolicy(joint_dim=dataset.state_dim, action_dim=dataset.action_dim).to(device)
-    
-    criterion = nn.MSELoss() 
+
+def train(dataset_pattern, epochs=30, batch_size=64):
+    dataset = RobotDemonstrationDataset(dataset_pattern)
+    # OPTIMIZATION: Parallel I/O workers and pinned memory!
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True
+    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = VisuomotorPolicy(
+        joint_dim=dataset.state_dim, action_dim=dataset.action_dim
+    ).to(device)
+    criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+    # OPTIMIZATION: Learning Rate Scheduler & AMP Scaler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    scaler = torch.amp.GradScaler("cuda")
 
     model.train()
     for epoch in range(epochs):
         epoch_loss = 0.0
         for imgs, joints, actions in dataloader:
-            # Move data to GPU if available
-            imgs, joints, actions = imgs.to(device), joints.to(device), actions.to(device)
-            # to forget the math from last batch
+            imgs, joints, actions = (
+                imgs.to(device),
+                joints.to(device),
+                actions.to(device),
+            )
             optimizer.zero_grad()
-            
-            # Forward pass
-            predicted_actions = model(imgs, joints)
-            
-            # Compute Loss
-            loss = criterion(predicted_actions, actions)
-            
-            # Backward pass & Optimize
-            loss.backward()
-            optimizer.step()
-            
+
+            # OPTIMIZATION: Automatic Mixed Precision (AMP)
+            with torch.amp.autocast("cuda"):
+                predicted_actions = model(imgs, joints)
+                loss = criterion(predicted_actions, actions)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
             epoch_loss += loss.item()
-            
+
+        scheduler.step()
         print(f"Epoch [{epoch+1}/{epochs}] - Loss: {epoch_loss/len(dataloader):.4f}")
 
-    # Save the trained model weights
-    save_path = "bc_model_weights.pth"
-    torch.save(model.state_dict(), save_path)
-    print(f"Training complete. Model weights saved to {save_path}")
+    torch.save(model.state_dict(), "bc_model_weights.pth")
+    print("Training complete.")
+
 
 def main():
-    # In a real scenario, the webserver API would pass the specific dataset path here.
-    # We will just look for the most recently created dummy dataset.
-    dataset_file = "demo_dataset_dummy.h5" 
-    
-    list_of_files = glob.glob('demo_dataset_*.h5')
-    
-    if not list_of_files:
-        print("Error: No datasets found. Please run the data collector first.")
+    if not glob.glob("demo_dataset_*.h5"):
         return
-        
-    # Magically select the one that was created most recently!
-    latest_dataset = max(list_of_files, key=os.path.getctime)
-    
-    print(f"Auto-selected the newest dataset: {latest_dataset}")
-    train(latest_dataset,epochs=30)
+    """ since there is no backend integration I just gave the pattern to all available datasets but in practice we can have 
+    mapping of datasets with respect to sessions and then the pattern is sent by backend server when requested """
+    train("demo_dataset_*.h5", epochs=30)
+
 
 if __name__ == "__main__":
     main()

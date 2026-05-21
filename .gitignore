@@ -2,6 +2,7 @@ devel/
 logs/
 build/
 install/
+data_dump/
 log/
 bin/
 lib/
