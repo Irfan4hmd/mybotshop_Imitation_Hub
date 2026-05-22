@@ -1,6 +1,6 @@
 manipulator:
   ros__parameters:
-    robot_type: "manipulator"
+    robot_type: "arm"
 
     # Topic Names
     camera_topic: "/camera/image_raw"
@@ -18,9 +18,9 @@ turtlebot:
     robot_type: "turtlebot"
 
     camera_topic: "/camera/image_raw"
-    state_topic: "/odom"
+    state_topic: "/turtle1/pose"
     teleop_topic: "/cmd_vel_teleop"
     command_topic: "/turtle1/cmd_vel"
 
-    state_dim: 2
+    state_dim: 3
     action_dim: 2

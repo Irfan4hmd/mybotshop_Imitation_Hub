@@ -68,10 +68,6 @@ class TurtlesimBridge(Node):
         img_msg = self.bridge.cv2_to_imgmsg(self._canvas, encoding="bgr8")
         img_msg.header.stamp = stamp
 
-        # Forward teleop cmd with the same timestamp
-        self.latest_cmd  # already a Twist, publish as-is
-        stamped_cmd = self.latest_cmd  # Twist has no header, timestamp is implicit
-
         self.img_pub.publish(img_msg)
         self.teleop_pub.publish(self.latest_cmd)
 

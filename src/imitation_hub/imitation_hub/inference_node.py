@@ -63,7 +63,7 @@ class InferenceNode(ImitationBaseNode):
             f"Model loaded from {weights_path} | "
             f"state_dim={state_dim} action_dim={action_dim}"
         )
-
+        self.safety_trigger_time = None
         if self.robot_type == "turtlesim":
             self._setup_turtlesim()
         elif self.robot_type == "arm":
@@ -77,7 +77,6 @@ class InferenceNode(ImitationBaseNode):
         self.get_logger().info(
             f"Inference Node running in AUTONOMOUS mode [{self.robot_type}]."
         )
-        self.safety_trigger_time = None
 
     # ------------------------------------------------------------------
     # Robot-specific setup

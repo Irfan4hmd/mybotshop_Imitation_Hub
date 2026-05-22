@@ -23,13 +23,6 @@ class DataCollectorNode(ImitationBaseNode):
       /joint_states      -> state  [6 joint positions]
       /teleop_cmd        -> action [6 joint commands]
 
-    To run for a real arm:
-        ros2 run imitation_hub data_collector_node --ros-args
-            -p robot_type:=arm
-            -p state_topic:=/joint_states
-            -p teleop_topic:=/teleop_cmd
-            -p state_dim:=6
-            -p action_dim:=6
     """
 
     def __init__(self):
@@ -106,6 +99,15 @@ class DataCollectorNode(ImitationBaseNode):
 
     def _turtlesim_callback(self, pose_msg, twist_msg):
         try:
+            # Don't record near-boundary frames — inconsistent operator behavior
+            # near walls pollutes the dataset
+            MARGIN = 1.0
+            if not (
+                MARGIN <= pose_msg.x <= 11.0 - MARGIN
+                and MARGIN <= pose_msg.y <= 11.0 - MARGIN
+            ):
+                return
+
             state = np.array([pose_msg.x, pose_msg.y, pose_msg.theta], dtype=np.float32)
             action = np.array(
                 [twist_msg.linear.x, twist_msg.angular.z], dtype=np.float32
