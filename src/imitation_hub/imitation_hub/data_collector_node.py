@@ -99,15 +99,6 @@ class DataCollectorNode(ImitationBaseNode):
 
     def _turtlesim_callback(self, pose_msg, twist_msg):
         try:
-            # Don't record near-boundary frames — inconsistent operator behavior
-            # near walls pollutes the dataset
-            MARGIN = 1.0
-            if not (
-                MARGIN <= pose_msg.x <= 11.0 - MARGIN
-                and MARGIN <= pose_msg.y <= 11.0 - MARGIN
-            ):
-                return
-
             state = np.array([pose_msg.x, pose_msg.y, pose_msg.theta], dtype=np.float32)
             action = np.array(
                 [twist_msg.linear.x, twist_msg.angular.z], dtype=np.float32
