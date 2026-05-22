@@ -1,7 +1,6 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
 from turtlesim.msg import Pose
 from cv_bridge import CvBridge
@@ -10,28 +9,43 @@ import numpy as np
 
 
 class TurtlesimBridge(Node):
+    """
+    Provides two things the data collector needs during teleoperation:
+
+      1. Fake camera image (/camera/image_raw)
+         A black canvas with a green dot at the turtle's position.
+         Published at 30Hz with a synchronized timestamp so
+         message_filters can pair it with other topics if needed.
+
+      2. Timestamped teleop commands (/cmd_vel_teleop)
+         Forwards /turtle1/cmd_vel with a fresh timestamp so
+         ApproximateTimeSynchronizer can match it to the pose.
+
+    State (pose) is NOT republished here — data_collector_node and
+    inference_node subscribe to /turtle1/pose directly.
+
+    NOTE: This bridge is only needed during DATA COLLECTION.
+          The inference node does not use it.
+    """
+
     def __init__(self):
         super().__init__("turtlesim_bridge")
         self.bridge = CvBridge()
         self._canvas = np.zeros((480, 640, 3), dtype=np.uint8)
-
-        # Listen to the Turtlesim game
-        self.create_subscription(Pose, "/turtle1/pose", self.pose_cb, 10)
-        self.create_subscription(Twist, "/turtle1/cmd_vel", self.cmd_cb, 10)
-
-        # Publish standard topics to feed your Data Collector
-        self.img_pub = self.create_publisher(Image, "/camera/image_raw", 10)
-        self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
-        self.teleop_pub = self.create_publisher(Twist, "/cmd_vel_teleop", 10)
-
         self.latest_pose = Pose()
         self.latest_cmd = Twist()
 
-        # Run at 30Hz (Standard camera framerate)
+        # Inputs — listen to turtlesim
+        self.create_subscription(Pose, "/turtle1/pose", self.pose_cb, 10)
+        self.create_subscription(Twist, "/turtle1/cmd_vel", self.cmd_cb, 10)
+
+        # Outputs — feed the data collector
+        self.img_pub = self.create_publisher(Image, "/camera/image_raw", 10)
+        self.teleop_pub = self.create_publisher(Twist, "/cmd_vel_teleop", 10)
+
+        # 30Hz timer — matches standard camera framerate
         self.timer = self.create_timer(1.0 / 30.0, self.timer_cb)
-        self.get_logger().info(
-            "Turtlesim Bridge running! Translating game data for the AI."
-        )
+        self.get_logger().info("Turtlesim Bridge running.")
 
     def pose_cb(self, msg):
         self.latest_pose = msg
@@ -40,31 +54,25 @@ class TurtlesimBridge(Node):
         self.latest_cmd = msg
 
     def timer_cb(self):
-        # 1. VISUALIZATION: Create an image with a green dot where the turtle is!
-        img = np.zeros((480, 640, 3), dtype=np.uint8)
-
+        # Draw turtle as a green dot on a black canvas
+        # Turtlesim world is 11x11 units — map to 640x480 pixels
         self._canvas[:] = 0
-
-        # OPTIMIZATION: Clamp coordinates so it never crashes
         x_px = int(np.clip((self.latest_pose.x / 11.0) * 640, 0, 639))
         y_px = int(np.clip((self.latest_pose.y / 11.0) * 480, 0, 479))
-
         cv2.circle(self._canvas, (x_px, 480 - y_px), 20, (0, 255, 0), -1)
 
+        # Single timestamp shared by both messages — critical for
+        # ApproximateTimeSynchronizer to match them correctly
+        stamp = self.get_clock().now().to_msg()
+
         img_msg = self.bridge.cv2_to_imgmsg(self._canvas, encoding="bgr8")
-        img_msg.header.stamp = (
-            self.get_clock().now().to_msg()
-        )  # Required for message_filters!
+        img_msg.header.stamp = stamp
 
-        # 2. Map Turtlesim Pose to standard ROS2 Odometry
-        odom_msg = Odometry()
-        odom_msg.header.stamp = img_msg.header.stamp  # Sync timestamps perfectly
-        odom_msg.twist.twist.linear.x = self.latest_pose.linear_velocity
-        odom_msg.twist.twist.angular.z = self.latest_pose.angular_velocity
+        # Forward teleop cmd with the same timestamp
+        self.latest_cmd  # already a Twist, publish as-is
+        stamped_cmd = self.latest_cmd  # Twist has no header, timestamp is implicit
 
-        # 3. Publish to the Imitation Hub
         self.img_pub.publish(img_msg)
-        self.odom_pub.publish(odom_msg)
         self.teleop_pub.publish(self.latest_cmd)
 
 

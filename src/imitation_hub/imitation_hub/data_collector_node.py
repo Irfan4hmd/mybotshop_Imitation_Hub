@@ -1,123 +1,149 @@
 import rclpy
 from imitation_hub.base_node import ImitationBaseNode
 import message_filters
-from sensor_msgs.msg import Image, JointState
-from nav_msgs.msg import Odometry
+from sensor_msgs.msg import JointState
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float64MultiArray
-from cv_bridge import CvBridge
+from turtlesim.msg import Pose
 import h5py
 import numpy as np
-import os, cv2
 from datetime import datetime
 
 
 class DataCollectorNode(ImitationBaseNode):
+    """
+    Records synchronized (state, action) pairs to HDF5 during teleoperation.
+
+    Turtlesim topic flow (handled by turtlesim_bridge.py):
+      /turtle1/pose      -> state  [x, y, theta]
+      /cmd_vel_teleop    -> action [linear.x, angular.z]
+                           (bridge forwards /turtle1/cmd_vel here with
+                            a synchronized timestamp for message_filters)
+
+    Real arm topic flow:
+      /joint_states      -> state  [6 joint positions]
+      /teleop_cmd        -> action [6 joint commands]
+
+    To run for a real arm:
+        ros2 run imitation_hub data_collector_node --ros-args
+            -p robot_type:=arm
+            -p state_topic:=/joint_states
+            -p teleop_topic:=/teleop_cmd
+            -p state_dim:=6
+            -p action_dim:=6
+    """
+
     def __init__(self):
         super().__init__("data_collector_node")
-        self.bridge = CvBridge()
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.dataset_path = f"demo_dataset_{timestamp}.h5"
         self.h5_file = h5py.File(self.dataset_path, "w")
 
-        # OPTIMIZATION: Chunking and Compression added
-        self.img_dset = self.h5_file.create_dataset(
-            "camera_images",
-            shape=(0, 120, 160, 3),
-            maxshape=(None, 120, 160, 3),
-            dtype="uint8",
-            chunks=(50, 120, 160, 3),
-            compression="gzip",
-        )
+        # HDF5 datasets grow dynamically — maxshape=None means unlimited rows
         self.state_dset = self.h5_file.create_dataset(
             "joint_states",
             shape=(0, self.state_dim),
             maxshape=(None, self.state_dim),
             dtype="float32",
-            chunks=(50, self.state_dim),
-            compression="gzip",
         )
         self.action_dset = self.h5_file.create_dataset(
             "actions",
             shape=(0, self.action_dim),
             maxshape=(None, self.action_dim),
             dtype="float32",
-            chunks=(50, self.action_dim),
-            compression="gzip",
         )
-
         self.dataset_size = 0
 
-        # OPTIMIZATION: RAM Buffers to prevent I/O bottlenecks
-        self.BUFFER_SIZE = 50
-        self.img_buffer, self.state_buffer, self.action_buffer = [], [], []
+        if self.robot_type == "turtlesim":
+            self._setup_turtlesim()
+        elif self.robot_type == "arm":
+            self._setup_arm()
+        else:
+            self.get_logger().error(
+                f"Unknown robot_type: '{self.robot_type}'. Use 'turtlesim' or 'arm'."
+            )
+            return
 
-        self.latest_action = np.zeros(self.action_dim, dtype=np.float32)
-
-        self.image_sub = message_filters.Subscriber(self, Image, self.camera_topic)
-
-        self.image_sub = message_filters.Subscriber(self, Image, self.camera_topic)
-        self.state_sub = message_filters.Subscriber(
-            self, self.StateMsg, self.state_topic
+        self.get_logger().info(
+            f"Data Collector started. Recording to {self.dataset_path}"
         )
-        self.create_subscription(self.TeleopMsg, self.teleop_topic, self.teleop_cb, 10)
+
+    # ------------------------------------------------------------------
+    # Robot-specific setup
+    # ------------------------------------------------------------------
+
+    def _setup_turtlesim(self):
+        self.state_sub = message_filters.Subscriber(self, Pose, self.state_topic)
+        self.action_sub = message_filters.Subscriber(self, Twist, self.teleop_topic)
 
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.image_sub, self.state_sub], queue_size=50, slop=0.1
+            [self.state_sub, self.action_sub],
+            queue_size=20,
+            slop=0.05,
+            allow_headerless=True,  # <-- add this
         )
-        self.ts.registerCallback(self.sync_callback)
+        self.ts.registerCallback(self._turtlesim_callback)
 
-    def teleop_cb(self, msg):
-        self.latest_action = self.parse_teleop(msg)
+    def _setup_arm(self):
+        """
+        Subscribes to:
+          - /joint_states  (JointState) — current joint positions
+          - /teleop_cmd    (JointState) — operator joint commands
+        """
+        self.state_sub = message_filters.Subscriber(self, JointState, self.state_topic)
+        self.action_sub = message_filters.Subscriber(
+            self, JointState, self.teleop_topic
+        )
 
-    def sync_callback(self, img_msg, state_msg):
+        self.ts = message_filters.ApproximateTimeSynchronizer(
+            [self.state_sub, self.action_sub], queue_size=20, slop=0.05
+        )
+        self.ts.registerCallback(self._arm_callback)
+
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
+
+    def _turtlesim_callback(self, pose_msg, twist_msg):
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(
-                img_msg, desired_encoding="passthrough"
+            state = np.array([pose_msg.x, pose_msg.y, pose_msg.theta], dtype=np.float32)
+            action = np.array(
+                [twist_msg.linear.x, twist_msg.angular.z], dtype=np.float32
             )
-            # OPTIMIZATION: Resize image BEFORE saving to save 9x disk space
-            cv_image = cv2.resize(cv_image, (160, 120), interpolation=cv2.INTER_AREA)
-
-            current_state = self.parse_state(state_msg)
-
-            self.img_buffer.append(cv_image)
-            self.state_buffer.append(current_state)
-            self.action_buffer.append(self.latest_action.copy())
-
-            # OPTIMIZATION: Bulk flush to disk
-            if len(self.img_buffer) >= self.BUFFER_SIZE:
-                self._flush_buffers()
-
+            self._append_to_h5(state, action)
         except Exception as e:
-            self.get_logger().error(f"Sync error: {e}")
+            self.get_logger().error(f"Turtlesim callback error: {e}")
 
-    def _flush_buffers(self):
-        s = self.dataset_size
-        n = len(self.img_buffer)
+    def _arm_callback(self, state_msg, action_msg):
+        try:
+            state = np.array(state_msg.position, dtype=np.float32)
+            action = np.array(action_msg.position, dtype=np.float32)
+            self._append_to_h5(state, action)
+        except Exception as e:
+            self.get_logger().error(f"Arm callback error: {e}")
 
-        self.img_dset.resize(s + n, axis=0)
-        self.state_dset.resize(s + n, axis=0)
-        self.action_dset.resize(s + n, axis=0)
+    # ------------------------------------------------------------------
+    # HDF5 writing
+    # ------------------------------------------------------------------
 
-        self.img_dset[s : s + n] = np.stack(self.img_buffer)
-        self.state_dset[s : s + n] = np.stack(self.state_buffer)
-        self.action_dset[s : s + n] = np.stack(self.action_buffer)
+    def _append_to_h5(self, state, action):
+        self.dataset_size += 1
 
-        self.dataset_size += n
-        self.img_buffer.clear()
-        self.state_buffer.clear()
-        self.action_buffer.clear()
+        self.state_dset.resize(self.dataset_size, axis=0)
+        self.state_dset[-1] = state
 
-        # OPTIMIZATION: Safety flush
-        if self.dataset_size % 500 == 0:
-            self.h5_file.flush()
+        self.action_dset.resize(self.dataset_size, axis=0)
+        self.action_dset[-1] = action
+
+        if self.dataset_size % 100 == 0:
+            self.get_logger().info(f"Recorded {self.dataset_size} frames...")
 
     def destroy_node(self):
-        if len(self.img_buffer) > 0:
-            self._flush_buffers()
         self.h5_file.close()
-        super().destroy_node()
+        self.get_logger().info(
+            f"Dataset saved: {self.dataset_path} ({self.dataset_size} frames)"
+        )
+        super().destroy_node()  # remove rclpy.shutdown() from here if present
 
 
 def main(args=None):
