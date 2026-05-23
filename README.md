@@ -78,7 +78,7 @@ We have 3 distinct phases:
 
    * Trigger: The user initiates a recording session while teleoperating the robot via the Web UI. The UI sends actions to the robot's controller manager, and upon               execution, the /joint_states are updated.
    * Process: A custom ROS2 data_collector_node subscribes to the human's teleop commands, the robot's /joint_states, and the /camera/image_raw.
-   * Storage: Using message_filters.ApproximateTimeSynchronizer, the node synchronizes the images with the joint states and saves them directly into an HDF5 or Zarr              format. (I would choose Zarr/HDF5 over standard rosbag2 because it allows for lightning-fast, parallelized dataloading in PyTorch).
+   * Storage:  Synchronized pairs are saved directly into HDF5 format with dynamic resizing (maxshape=None). (I would choose Zarr/HDF5 over standard rosbag2 because it allows for lightning-fast, parallelized dataloading in PyTorch).
     
     
 **2. Training the Brain(Model):**
@@ -101,10 +101,6 @@ While continuous integration and scheduled training (e.g., via cron jobs) are st
 
 You will notice the architecture routes both `/teleop_cmd` and `/joint_trajectory_controller` through the `ros2_control` Manager. Teleoperation via the Web UI typically requires a streaming controller (like a Forward Position/Velocity Controller or MoveIt Servo) for responsive human input. Conversely, the Inference Node can predict action chunks and execute them smoothly via the `joint_trajectory_controller`, allowing the system to remain hardware-agnostic while ensuring safe, interpolated movements.To fulfill the requirement that this platform must work with different types of robots (humanoids, arms, mobile bases), hardcoding topic names and AI network dimensions is avoided. The entire pipeline is driven by a central ROS2 Parameter File (config/robot_params.yaml).
 
-**Resolution Independence & I/O Optimization**
+**Why State-Only MLP for Turtlesim?**
 
-The PyTorch VisuomotorPolicy integrates an AdaptiveAvgPool2d layer. This mathematically guarantees a fixed feature vector size entering the MLP, preventing matrix multiplication crashes regardless of the physical camera resolution used (e.g., 480p vs 1080p). Furthermore, cv2.resize is applied frame-by-frame during the PyTorch Dataloader phase to bypass severe I/O bottlenecks and RAM overflow, resulting in exponentially faster GPU training speeds.
-
-**Controller Management**
-
-The architecture routes both /teleop_cmd and /joint_trajectory_controller through the ros2_control Manager. Teleoperation via the Web UI typically requires a streaming controller (like a Forward Position/Velocity Controller) for responsive human input. Conversely, the Inference Node safely interpolates AI action chunks via the joint_trajectory_controller, allowing the system to remain hardware-agnostic while ensuring safe, continuous movements.
+Turtlesim has no camera. The "image" from the bridge is a synthetic black canvas with a green dot — there is no meaningful visual information to extract. Using ResNet18 on a green dot would be using 11 million pretrained parameters to process a single pixel position. The pose [x, y, theta] already contains all the information perfectly. For a real arm with a camera, the architecture switches to ResNet18 + MLP (VisuomotorPolicy) which fuses visual features with joint state observations.

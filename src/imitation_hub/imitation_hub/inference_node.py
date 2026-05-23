@@ -143,7 +143,7 @@ class InferenceNode(ImitationBaseNode):
             # ---------------------------------------------------------
             # 2. NORMAL OPERATION: Check if we NEED to trigger safety
             # ---------------------------------------------------------
-            MARGIN = 1.0
+            MARGIN = 0.5
             is_too_close_to_x = (pose_msg.x < MARGIN) or (pose_msg.x > 11.0 - MARGIN)
             is_too_close_to_y = (pose_msg.y < MARGIN) or (pose_msg.y > 11.0 - MARGIN)
 
@@ -160,9 +160,14 @@ class InferenceNode(ImitationBaseNode):
             state = np.array([pose_msg.x, pose_msg.y, pose_msg.theta], dtype=np.float32)
             action = self._infer(state)
 
+            # Clamp velocities to safe ranges matching teleop speed
+            MAX_LINEAR = 1.0  # adjust to match your teleop max speed
+            MAX_ANGULAR = 1.0
+
             cmd = Twist()
-            cmd.linear.x = float(action[0])
-            cmd.angular.z = float(action[1])
+            cmd.linear.x = float(np.clip(action[0], -MAX_LINEAR, MAX_LINEAR))
+            cmd.angular.z = float(np.clip(action[1], -MAX_ANGULAR, MAX_ANGULAR))
+            self.cmd_pub.publish(cmd)
             self.cmd_pub.publish(cmd)
 
         except Exception as e:
@@ -222,6 +227,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+
         node.destroy_node()
         rclpy.shutdown()
 

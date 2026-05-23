@@ -147,7 +147,7 @@ def train(dataset_pattern="demo_dataset_*.h5", epochs=100, batch_size=64):
 
     model = BehaviorCloningPolicy(dataset.state_dim, dataset.action_dim).to(device)
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_val_loss = float("inf")
