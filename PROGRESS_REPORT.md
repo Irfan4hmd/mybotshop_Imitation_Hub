@@ -1,4 +1,5 @@
-# Progress Report: Imitation Hub Prototype
+
+# Progress Report: Imitation Hub Prototype (This is old updates)
 
 ## 1. What Has Been Completed
 An end-to-end, runnable structural prototype for the MYBOTSHOP Imitation Hub has been implemented. The core focus was building a robust software architecture that seamlessly bridges ROS2 hardware controllers with PyTorch Deep Learning environments.
