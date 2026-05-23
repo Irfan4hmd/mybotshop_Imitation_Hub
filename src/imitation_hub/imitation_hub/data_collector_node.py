@@ -1,94 +1,143 @@
 import rclpy
-from rclpy.node import Node
 from imitation_hub.base_node import ImitationBaseNode
 import message_filters
-from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Float64MultiArray
-from cv_bridge import CvBridge
+from sensor_msgs.msg import JointState
+from geometry_msgs.msg import Twist
+from turtlesim.msg import Pose
 import h5py
 import numpy as np
-import os
 from datetime import datetime
 
+
 class DataCollectorNode(ImitationBaseNode):
+    """
+    Records synchronized (state, action) pairs to HDF5 during teleoperation.
+
+    Turtlesim topic flow (handled by turtlesim_bridge.py):
+      /turtle1/pose      -> state  [x, y, theta]
+      /cmd_vel_teleop    -> action [linear.x, angular.z]
+                           (bridge forwards /turtle1/cmd_vel here with
+                            a synchronized timestamp for message_filters)
+
+    Real arm topic flow:
+      /joint_states      -> state  [6 joint positions]
+      /teleop_cmd        -> action [6 joint commands]
+
+    """
+
     def __init__(self):
-        super().__init__('data_collector_node')
-        
-        self.bridge = CvBridge()
-        
-        # Define HDF5 file to save the dataset (fast loading for PyTorch)
+        super().__init__("data_collector_node")
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # taking current timestamp to generate unique filname
         self.dataset_path = f"demo_dataset_{timestamp}.h5"
-        self.h5_file = h5py.File(self.dataset_path, 'w')
-        
-        # Create dynamically resizable HDF5 datasets
-        self.max_shape = (None,)
-        # 3 empty folders for camera_images, joint states and actions
-        # file grows dynamically becuase of maxshape set to none
-        self.img_dset = self.h5_file.create_dataset('camera_images', shape=(0, 480, 640, 3), maxshape=(None, 480, 640, 3), dtype='uint8')
-        self.joint_dset = self.h5_file.create_dataset('joint_states', shape=(0, 6), maxshape=(None, 6), dtype='float32')
-        self.action_dset = self.h5_file.create_dataset('actions', shape=(0, 6), maxshape=(None, 6), dtype='float32')
-        
+        self.h5_file = h5py.File(self.dataset_path, "w")
+
+        # HDF5 datasets grow dynamically — maxshape=None means unlimited rows
+        self.state_dset = self.h5_file.create_dataset(
+            "joint_states",
+            shape=(0, self.state_dim),
+            maxshape=(None, self.state_dim),
+            dtype="float32",
+        )
+        self.action_dset = self.h5_file.create_dataset(
+            "actions",
+            shape=(0, self.action_dim),
+            maxshape=(None, self.action_dim),
+            dtype="float32",
+        )
         self.dataset_size = 0
 
-        # Subscriptions using message_filters for synchronization
-        # We don't use standard subscribers because camera (30hz) and joints (100hz) publish at different rates.
-        self.image_sub = message_filters.Subscriber(self, Image, self.camera_topic)
-        self.joint_sub = message_filters.Subscriber(self, JointState, self.state_topic)
-        self.action_sub = message_filters.Subscriber(self, Float64MultiArray, self.teleop_topic) # Human commands
+        if self.robot_type == "turtlesim":
+            self._setup_turtlesim()
+        elif self.robot_type == "arm":
+            self._setup_arm()
+        else:
+            self.get_logger().error(
+                f"Unknown robot_type: '{self.robot_type}'. Use 'turtlesim' or 'arm'."
+            )
+            return
 
-        # ApproximateTimeSynchronizer matches messages that arrive around the same time
-        self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.image_sub, self.joint_sub, self.action_sub],
-            queue_size=10,
-            slop=0.05 # Allow 50ms difference between messages
+        self.get_logger().info(
+            f"Data Collector started. Recording to {self.dataset_path}"
         )
-        self.ts.registerCallback(self.sync_callback)
 
-        self.get_logger().info(f"Data Collector Node started. Recording to {self.dataset_path}")
+    # ------------------------------------------------------------------
+    # Robot-specific setup
+    # ------------------------------------------------------------------
 
-    def sync_callback(self, img_msg, joint_msg, action_msg):
+    def _setup_turtlesim(self):
+        self.state_sub = message_filters.Subscriber(self, Pose, self.state_topic)
+        self.action_sub = message_filters.Subscriber(self, Twist, self.teleop_topic)
+
+        self.ts = message_filters.ApproximateTimeSynchronizer(
+            [self.state_sub, self.action_sub],
+            queue_size=20,
+            slop=0.05,
+            allow_headerless=True,  # <-- add this
+        )
+        self.ts.registerCallback(self._turtlesim_callback)
+
+    def _setup_arm(self):
         """
-        This callback only fires when an image, joint state, and action command 
-        arrive at approximately the same timestamp.
+        Subscribes to:
+          - /joint_states  (JointState) — current joint positions
+          - /teleop_cmd    (JointState) — operator joint commands
         """
+        self.state_sub = message_filters.Subscriber(self, JointState, self.state_topic)
+        self.action_sub = message_filters.Subscriber(
+            self, JointState, self.teleop_topic
+        )
+
+        self.ts = message_filters.ApproximateTimeSynchronizer(
+            [self.state_sub, self.action_sub], queue_size=20, slop=0.05
+        )
+        self.ts.registerCallback(self._arm_callback)
+
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
+
+    def _turtlesim_callback(self, pose_msg, twist_msg):
         try:
-            # 1. Convert ROS Image to Numpy Array 
-            # passthrough means keep the colours as they are
-            cv_image = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding='passthrough')
-            
-            # 2. Extract joint positions (current state) and teleop commands (human action)
-            current_joints = np.array(joint_msg.position, dtype=np.float32)
-            human_action = np.array(action_msg.data, dtype=np.float32)
-            
-            # 3. Save to HDF5 Dataset
-            self._append_to_h5(cv_image, current_joints, human_action)
-            
+            state = np.array([pose_msg.x, pose_msg.y, pose_msg.theta], dtype=np.float32)
+            action = np.array(
+                [twist_msg.linear.x, twist_msg.angular.z], dtype=np.float32
+            )
+            self._append_to_h5(state, action)
         except Exception as e:
-            self.get_logger().error(f"Failed to process synchronized messages: {e}")
+            self.get_logger().error(f"Turtlesim callback error: {e}")
 
-    def _append_to_h5(self, image, joints, action):
-        """ Dynamically resize HDF5 datasets and append new synchronized frame """
+    def _arm_callback(self, state_msg, action_msg):
+        try:
+            state = np.array(state_msg.position, dtype=np.float32)
+            action = np.array(action_msg.position, dtype=np.float32)
+            self._append_to_h5(state, action)
+        except Exception as e:
+            self.get_logger().error(f"Arm callback error: {e}")
+
+    # ------------------------------------------------------------------
+    # HDF5 writing
+    # ------------------------------------------------------------------
+
+    def _append_to_h5(self, state, action):
         self.dataset_size += 1
-        
-        self.img_dset.resize(self.dataset_size, axis=0)
-        self.img_dset[-1] = image
-        
-        self.joint_dset.resize(self.dataset_size, axis=0)
-        self.joint_dset[-1] = joints
-        
+
+        self.state_dset.resize(self.dataset_size, axis=0)
+        self.state_dset[-1] = state
+
         self.action_dset.resize(self.dataset_size, axis=0)
         self.action_dset[-1] = action
-        
+
         if self.dataset_size % 100 == 0:
-            self.get_logger().info(f"Recorded {self.dataset_size} synchronized frames...")
+            self.get_logger().info(f"Recorded {self.dataset_size} frames...")
 
     def destroy_node(self):
-        # Ensure the HDF5 file is properly closed when node shuts down safely
         self.h5_file.close()
-        self.get_logger().info(f"Dataset successfully saved with {self.dataset_size} frames.")
-        super().destroy_node()
+        self.get_logger().info(
+            f"Dataset saved: {self.dataset_path} ({self.dataset_size} frames)"
+        )
+        super().destroy_node()  # remove rclpy.shutdown() from here if present
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -101,5 +150,6 @@ def main(args=None):
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

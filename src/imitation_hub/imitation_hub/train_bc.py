@@ -1,139 +1,217 @@
-import os
+import glob
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import h5py
 import numpy as np
 
+
 # ---------------------------------------------------------
-# 1. PyTorch Dataset for loading HDF5 (Fast I/O)
+# 1. Dataset — works for any robot, no images required
+#    HDF5 schema: joint_states (N, state_dim), actions (N, action_dim)
 # ---------------------------------------------------------
 class RobotDemonstrationDataset(Dataset):
-    def __init__(self, h5_file_path):
-        self.h5_file_path = h5_file_path
-        self.file = h5py.File(h5_file_path, 'r')
-        
-        self.images = self.file['camera_images']
-        self.joints = self.file['joint_states']
-        self.actions = self.file['actions']
-        
-        self.length = self.images.shape[0]
+    """
+    Loads (state, action) pairs from one or more HDF5 files.
+    No camera images — state-only policy.
+
+    For turtlesim: state_dim=3 (x, y, theta), action_dim=2 (linear, angular)
+    For a real arm: state_dim=6, action_dim=6
+    """
+
+    def __init__(self, dataset_pattern="demo_dataset_*.h5"):
+        self.file_paths = glob.glob(dataset_pattern)
+        if not self.file_paths:
+            raise FileNotFoundError(f"No files found matching: {dataset_pattern}")
+
+        self.file_handles = {}  # Lazy open — safe for multiprocessing DataLoader
+
+        with h5py.File(self.file_paths[0], "r") as f:
+            self.state_dim = f["joint_states"].shape[1]
+            self.action_dim = f["actions"].shape[1]
+
+        # Build a flat global index map: global_idx -> (file_path, local_idx)
+        self.index_map = []
+        for path in self.file_paths:
+            with h5py.File(path, "r") as f:
+                for i in range(f["joint_states"].shape[0]):
+                    self.index_map.append((path, i))
+
+        print(
+            f"Dataset: {len(self.index_map)} frames across {len(self.file_paths)} file(s) "
+            f"| state_dim={self.state_dim} action_dim={self.action_dim}"
+        )
+
+        # Compute normalization statistics from entire dataset
+        print("Computing normalization stats...")
+        all_states, all_actions = [], []
+        for path in self.file_paths:
+            with h5py.File(path, "r") as f:
+                all_states.append(f["joint_states"][:])
+                all_actions.append(f["actions"][:])
+
+        all_states = np.concatenate(all_states, axis=0)
+        all_actions = np.concatenate(all_actions, axis=0)
+
+        self.state_mean = torch.tensor(all_states.mean(axis=0), dtype=torch.float32)
+        self.state_std = torch.tensor(
+            all_states.std(axis=0) + 1e-8, dtype=torch.float32
+        )
+        self.action_mean = torch.tensor(all_actions.mean(axis=0), dtype=torch.float32)
+        self.action_std = torch.tensor(
+            all_actions.std(axis=0) + 1e-8, dtype=torch.float32
+        )
+
+        print(f"State  mean={self.state_mean.numpy()}  std={self.state_std.numpy()}")
+        print(f"Action mean={self.action_mean.numpy()} std={self.action_std.numpy()}")
 
     def __len__(self):
-        return self.length
+        return len(self.index_map)
 
     def __getitem__(self, idx):
-        # Read data
-        img = self.images[idx]
-        joints = self.joints[idx]
-        action = self.actions[idx]
+        path, local_idx = self.index_map[idx]
 
-        # Convert Image from HWC (OpenCV/ROS) to CHW (PyTorch standard)
-        img = np.transpose(img, (2, 0, 1))
-        
-        # Normalize image to [0, 1]
-        img = img.astype(np.float32) / 255.0
+        # Open file lazily — each DataLoader worker opens its own handle
+        if path not in self.file_handles:
+            self.file_handles[path] = h5py.File(path, "r")
 
-        return (
-            torch.tensor(img, dtype=torch.float32), 
-            torch.tensor(joints, dtype=torch.float32), 
-            torch.tensor(action, dtype=torch.float32)
+        f = self.file_handles[path]
+        state = torch.from_numpy(f["joint_states"][local_idx])
+        action = torch.from_numpy(f["actions"][local_idx])
+
+        # Normalize to zero mean, unit variance
+        state = (state - self.state_mean) / self.state_std
+        action = (action - self.action_mean) / self.action_std
+
+        return state, action
+
+
+# ---------------------------------------------------------
+# 2. Policy — generic MLP, works for any state/action dims
+#
+#    For turtlesim: state_dim=3, action_dim=2
+#    For a real arm: state_dim=6, action_dim=6
+#
+#    NOTE: For a real arm with a camera, replace this with
+#    VisuomotorPolicy (ResNet18 + MLP). State-only is used
+#    here because turtlesim has no camera.
+# ---------------------------------------------------------
+class BehaviorCloningPolicy(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(BehaviorCloningPolicy, self).__init__()
+
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, action_dim),
         )
 
-# ---------------------------------------------------------
-# 2. Visuomotor Neural Network Architecture
-# ---------------------------------------------------------
-class VisuomotorPolicy(nn.Module):
-    def __init__(self, joint_dim=6, action_dim=6):
-        super(VisuomotorPolicy, self).__init__()
-        
-        # Image Feature Extractor (Simple CNN for demonstration)
-        # In production, we might use a pre-trained ResNet18 here.
-        self.cnn = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=5, stride=2), nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=5, stride=2), nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=5, stride=2), nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(64 * 56 * 76, 128), # Assuming 480x640 input, flattened
-            nn.ReLU()
-        )
-        
-        # Action Predictor (Combines Image Features + Current Joints)
-        self.mlp = nn.Sequential(
-            nn.Linear(128 + joint_dim, 128), nn.ReLU(),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, action_dim) # Outputs the predicted joint command
-        )
+    def forward(self, state):
+        return self.net(state)
 
-    def forward(self, img, joints):
-        # Extract features from the camera image
-        img_features = self.cnn(img)
-        
-        # Concatenate image features with the robot's current joint states
-        combined_features = torch.cat((img_features, joints), dim=1)
-        
-        # Predict the next action
-        action_pred = self.mlp(combined_features)
-        return action_pred
 
 # ---------------------------------------------------------
-# 3. Main Training Loop
+# 3. Training loop
 # ---------------------------------------------------------
-def train(dataset_path, epochs=10, batch_size=32):
-    print(f"Loading dataset from {dataset_path}...")
-    dataset = RobotDemonstrationDataset(dataset_path)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    
-    # Check for GPU
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Training on device: {device}")
+def train(dataset_pattern="demo_dataset_*.h5", epochs=100, batch_size=64):
+    dataset = RobotDemonstrationDataset(dataset_pattern)
 
-    model = VisuomotorPolicy(joint_dim=6, action_dim=6).to(device)
-    
-    # MSE Loss is standard for Behavior Cloning (Regression)
-    criterion = nn.MSELoss() 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    # Train / val split — 80/20
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_set, val_set = random_split(
+        dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42)
+    )
+    print(f"Split: {train_size} train / {val_size} val")
 
-    model.train()
+    train_loader = DataLoader(
+        train_set, batch_size=batch_size, shuffle=True, num_workers=2
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=batch_size, shuffle=False, num_workers=2
+    )
+
+    # Sanity check — baseline MSE if model just predicts the mean
+    for states, actions in train_loader:
+        baseline = (actions - actions.mean(dim=0)).pow(2).mean()
+        print(f"Baseline MSE (predict mean): {baseline.item():.4f}")
+        break
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training on: {device}")
+
+    model = BehaviorCloningPolicy(dataset.state_dim, dataset.action_dim).to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    best_val_loss = float("inf")
+
     for epoch in range(epochs):
-        epoch_loss = 0.0
-        for imgs, joints, actions in dataloader:
-            # Move data to GPU if available
-            imgs, joints, actions = imgs.to(device), joints.to(device), actions.to(device)
-            # to forget the math from last batch
+        # --- Train ---
+        model.train()
+        train_loss = 0.0
+        for states, actions in train_loader:
+            states, actions = states.to(device), actions.to(device)
             optimizer.zero_grad()
-            
-            # Forward pass
-            predicted_actions = model(imgs, joints)
-            
-            # Compute Loss
-            loss = criterion(predicted_actions, actions)
-            
-            # Backward pass & Optimize
+            loss = criterion(model(states), actions)
             loss.backward()
             optimizer.step()
-            
-            epoch_loss += loss.item()
-            
-        print(f"Epoch [{epoch+1}/{epochs}] - Loss: {epoch_loss/len(dataloader):.4f}")
+            train_loss += loss.item()
 
-    # Save the trained model weights
-    save_path = "bc_model_weights.pth"
-    torch.save(model.state_dict(), save_path)
-    print(f"Training complete. Model weights saved to {save_path}")
+        scheduler.step()
 
+        # --- Validate ---
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for states, actions in val_loader:
+                states, actions = states.to(device), actions.to(device)
+                val_loss += criterion(model(states), actions).item()
+
+        avg_train = train_loss / len(train_loader)
+        avg_val = val_loss / len(val_loader)
+
+        # Save best checkpoint — includes normalization stats for inference node
+        if avg_val < best_val_loss:
+            best_val_loss = avg_val
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "state_dim": dataset.state_dim,
+                    "action_dim": dataset.action_dim,
+                    "state_mean": dataset.state_mean,
+                    "state_std": dataset.state_std,
+                    "action_mean": dataset.action_mean,
+                    "action_std": dataset.action_std,
+                },
+                "bc_model_weights.pth",
+            )
+            saved = " <- best, saved"
+        else:
+            saved = ""
+
+        print(
+            f"Epoch [{epoch+1:03d}/{epochs}] | Train: {avg_train:.4f} | Val: {avg_val:.4f}{saved}"
+        )
+
+    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
+
+
+# ---------------------------------------------------------
+# 4. Entry point
+# ---------------------------------------------------------
 def main():
-    # In a real scenario, the webserver API would pass the specific dataset path here.
-    # We will just look for the most recently created dummy dataset.
-    dataset_file = "demo_dataset_dummy.h5" 
-    
-    if not os.path.exists(dataset_file):
-        print(f"Error: {dataset_file} not found. Please run the data collector first.")
-        # For demonstration purposes in a structural prototype, we won't crash.
+    if not glob.glob("demo_dataset_*.h5"):
+        print("No dataset files found. Run data_collector_node first.")
         return
-        
-    train(dataset_file)
+    train("demo_dataset_*.h5", epochs=100)
+
 
 if __name__ == "__main__":
     main()
