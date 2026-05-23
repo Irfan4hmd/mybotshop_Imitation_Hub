@@ -1,0 +1,78 @@
+{
+  "api_version": "1.0",
+  "description": "REST API endpoints bridging the MYBOTSHOP Webserver UI with the underlying ROS2 Imitation Learning backend.",
+  "base_url": "/api/v1/imitation",
+  "endpoints": [
+    {
+      "method": "POST",
+      "route": "/record/start",
+      "description": "Spins up the ROS2 Data Collector node in a background process to begin synchronizing and recording teleop data.",
+      "payload": {
+        "dataset_prefix": "task_pick_apple",
+        "robot_type": "manipulator"
+      },
+      "response": {
+        "status": "success",
+        "message": "Recording started.",
+        "file_path": "demo_dataset_task_pick_apple_20240520_1430.h5"
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/record/stop",
+      "description": "Sends a SIGINT to the Data Collector node, safely flushing HDF5 buffers and closing the dataset.",
+      "response": {
+        "status": "success",
+        "message": "Dataset saved successfully."
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/train/start",
+      "description": "Triggers the PyTorch Behavior Cloning script as an async job. Returns a task_id to poll for progress.",
+      "payload": {
+        "dataset_pattern": "demo_dataset_*.h5",
+        "epochs": 50,
+        "batch_size": 64
+      },
+      "response": {
+        "status": "accepted",
+        "task_id": "job_98765",
+        "message": "Training initiated on GPU."
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/train/status/{task_id}",
+      "description": "Allows the Web UI to poll the current training progress to display a loading bar or loss graph.",
+      "response": {
+        "status": "training",
+        "current_epoch": 12,
+        "total_epochs": 50,
+        "current_loss": 0.0432
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/autonomy/start",
+      "description": "Halts teleoperation streams and spins up the Inference Node, handing hardware control over to the PyTorch model.",
+      "payload": {
+        "weights_file": "bc_model_weights.pth",
+        "robot_type": "manipulator"
+      },
+      "response": {
+        "status": "success",
+        "message": "Autonomy node started. Robot is currently under AI control."
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/autonomy/estop",
+      "description": "Emergency Stop. Immediately kills the Inference Node and halts all ROS2 hardware controllers to ensure safety.",
+      "response": {
+        "status": "success",
+        "message": "Hardware safely halted."
+      }
+    }
+  ]
+}
