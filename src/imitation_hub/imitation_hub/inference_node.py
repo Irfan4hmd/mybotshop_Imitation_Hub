@@ -168,7 +168,6 @@ class InferenceNode(ImitationBaseNode):
             cmd.linear.x = float(np.clip(action[0], -MAX_LINEAR, MAX_LINEAR))
             cmd.angular.z = float(np.clip(action[1], -MAX_ANGULAR, MAX_ANGULAR))
             self.cmd_pub.publish(cmd)
-            self.cmd_pub.publish(cmd)
 
         except Exception as e:
             self.get_logger().error(f"Inference failed: {e}")

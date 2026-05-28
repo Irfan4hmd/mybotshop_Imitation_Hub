@@ -18,7 +18,7 @@ turtlebot:
     robot_type: "turtlebot"
 
     camera_topic: "/camera/image_raw"
-    state_topic: "/turtle1/pose"
+    state_topic: "/odom"
     teleop_topic: "/cmd_vel_teleop"
     command_topic: "/turtle1/cmd_vel"
 

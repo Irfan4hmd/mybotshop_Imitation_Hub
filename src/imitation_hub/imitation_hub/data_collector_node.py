@@ -1,8 +1,10 @@
+import math
 import rclpy
+from nav_msgs.msg import Odometry
 from imitation_hub.base_node import ImitationBaseNode
 import message_filters
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TwistStamped
 from turtlesim.msg import Pose
 import h5py
 import numpy as np
@@ -14,7 +16,7 @@ class DataCollectorNode(ImitationBaseNode):
     Records synchronized (state, action) pairs to HDF5 during teleoperation.
 
     Turtlesim topic flow (handled by turtlesim_bridge.py):
-      /turtle1/pose      -> state  [x, y, theta]
+      /odom      -> state  [x, y, theta]
       /cmd_vel_teleop    -> action [linear.x, angular.z]
                            (bridge forwards /turtle1/cmd_vel here with
                             a synchronized timestamp for message_filters)
@@ -66,14 +68,16 @@ class DataCollectorNode(ImitationBaseNode):
     # ------------------------------------------------------------------
 
     def _setup_turtlesim(self):
-        self.state_sub = message_filters.Subscriber(self, Pose, self.state_topic)
-        self.action_sub = message_filters.Subscriber(self, Twist, self.teleop_topic)
+        self.state_sub = message_filters.Subscriber(self, Odometry, self.state_topic)
+        self.action_sub = message_filters.Subscriber(
+            self, TwistStamped, self.teleop_topic
+        )
 
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.state_sub, self.action_sub],
             queue_size=20,
             slop=0.05,
-            allow_headerless=True,  # <-- add this
+            # allow_headerless=True,  # <-- add this
         )
         self.ts.registerCallback(self._turtlesim_callback)
 
@@ -99,9 +103,14 @@ class DataCollectorNode(ImitationBaseNode):
 
     def _turtlesim_callback(self, pose_msg, twist_msg):
         try:
-            state = np.array([pose_msg.x, pose_msg.y, pose_msg.theta], dtype=np.float32)
+            q = pose_msg.pose.pose.orientation
+            theta = 2.0 * math.atan2(q.z, q.w)
+            state = np.array(
+                [pose_msg.pose.pose.position.x, pose_msg.pose.pose.position.y, theta],
+                dtype=np.float32,
+            )
             action = np.array(
-                [twist_msg.linear.x, twist_msg.angular.z], dtype=np.float32
+                [twist_msg.twist.linear.x, twist_msg.twist.angular.z], dtype=np.float32
             )
             self._append_to_h5(state, action)
         except Exception as e:

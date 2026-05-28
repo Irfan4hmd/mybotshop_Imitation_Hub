@@ -21,7 +21,7 @@ class ImitationBaseNode(Node):
         },
         "turtlebot": {
             "robot_type": "turtlesim",
-            "state_topic": "/turtle1/pose",
+            "state_topic": "/odom",
             "teleop_topic": "/cmd_vel_teleop",
             "command_topic": "/turtle1/cmd_vel",
             "state_dim": 3,  # x, y, theta
